@@ -327,8 +327,8 @@ class CertGen():
         crl.add_revoked(revoked)
         crl.sign(parentCert, parentKey, bytes(digest, encoding='utf-8'))
         crl.set_version(1)
-        authFile = re.sub('\/tmp\/', '', authCert)
-        authFile = re.sub('\.crt', '', authFile)
+        authFile = re.sub(r'/tmp/', '', authCert)
+        authFile = re.sub(r'\.crt', '', authFile)
         crlFile = base_dir + authFile + '.crl'
         self.obj2pem(crl, crlFile, 'crl')
         return crlFile
