@@ -4,107 +4,145 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a certificate generation and management tool built with Python. The project uses the `cryptography` library (via pyOpenSSL) to generate X.509 certificates with various configurations including Root CAs, Intermediate CAs, and leaf certificates (CN). It also supports CSR signing and CRL generation.
+This is a certificate generation and management tool built with Python. The project uses the `cryptography` library to generate X.509 certificates with various configurations including Root CAs, Intermediate CAs, and leaf certificates (CN). It also supports CSR signing and CRL generation.
 
-## Development Environment
+## Development Commands
 
 ### Setup
 ```bash
-# Install dependencies using uv (project uses uv for package management)
 uv sync
-
-# Activate virtual environment
-source .venv/bin/activate
 ```
 
 ### Linting
 ```bash
-# Run ruff for linting
-ruff check .
-
-# Auto-fix issues
-ruff check --fix .
+uv run ruff check .
+uv run ruff check --fix .
 ```
 
 ### Testing
-The project includes a runnable example in the `__main__` block of `cert_gen/cert_ops.py`:
 ```bash
-python -m cert_gen.cert_ops
+# Run all tests
+uv run pytest
+
+# Run with verbose output
+uv run pytest -v
+
+# Run specific test file
+uv run pytest tests/test_key_types.py
+
+# Run specific test class
+uv run pytest tests/test_cert_ops.py::TestCertGenBasic
+
+# Run specific test
+uv run pytest tests/test_cert_ops.py::TestCertGenBasic::test_generate_root_ca
+
+# Run with coverage
+uv run pytest --cov=cert_gen --cov-report=term-missing
+
+# Run with HTML coverage report
+uv run pytest --cov=cert_gen --cov-report=html
+
+# Run with memory profiling
+uv run pytest --memray
+
+# Run performance benchmarks
+uv run pytest --codspeed
+```
+
+### Run Example
+```bash
+uv run python -m cert_gen.cert_ops
 ```
 
 ## Architecture
 
 ### Core Module: `cert_gen/`
 
-The package is structured around two main files:
-
 **`cert_ops.py`** - Main certificate operations class (`CertGen`)
-- Generates certificates with customizable parameters (key length, signing algorithm, validity periods)
+- Generates certificates with customizable parameters (key type, key length, signing algorithm, validity periods)
 - Manages certificate chains (Root → Intermediate → Leaf)
 - Handles CSR signing and CRL generation
-- Uses cryptography library's x509 module (migrated from legacy pyOpenSSL)
+- Uses cryptography library's x509 module
 
 **`cert_extensions.py`** - Extension definitions dictionary (`EXTENSIONS`)
 - Defines three certificate types: "Root", "Intermediate", "Leaf"
 - Each type has specific x509 extensions (BasicConstraints, KeyUsage, ExtendedKeyUsage)
-- Extension configurations are stored as dictionaries with extension objects and criticality flags
+- Extension configurations are stored as TypedDict with extension objects and criticality flags
+
+### Test Suite: `tests/`
+
+```
+tests/
+├── conftest.py           # Shared fixtures (cert_gen, temp_dir, cert_gen_with_root, etc.)
+├── test_cert_ops.py      # Core certificate operations (init, validation, validity)
+├── test_key_types.py     # All key types (Ed25519, Ed448, ECDSA, RSA, DSA)
+├── test_cert_chain.py    # Certificate chain creation and hierarchy
+├── test_cert_extensions.py # Extension configuration validation
+└── test_csr_crl.py       # CSR signing and CRL generation
+```
+
+### Key Types
+
+The library supports multiple cryptographic key types:
+
+| Key Type | Algorithm | Key Size | Notes |
+|----------|-----------|----------|-------|
+| `ed25519` | Ed25519 (Curve25519) | Fixed 256-bit | **Default**, modern, fast |
+| `ed448` | Ed448 (Curve448) | Fixed 448-bit | Higher security margin |
+| `ecdsa` | ECDSA (SECP256R1) | Fixed 256-bit | Wide compatibility |
+| `rsa` | RSA | 1024-4096 bit | Legacy, configurable size |
+| `dsa` | DSA | 1024-4096 bit | Legacy, configurable size |
+
+EdDSA keys (Ed25519/Ed448) use `None` as the hash algorithm parameter since they have built-in hashing.
 
 ### Certificate Hierarchy
 
 The system enforces a strict certificate hierarchy:
 1. **Root CA** (`cert_category="RootCA"`): Self-signed, stored in `self.rootca`
 2. **Intermediate CA** (`cert_category="IntCA"`): Signed by Root CA, stored in `self.intca`
-3. **Leaf/CN** (`cert_category="CN"`): Signed by either Intermediate CA (if present) or Root CA
+3. **Leaf/CN** (`cert_category="CN"`): Signed by Intermediate CA (if present) or Root CA
 
-Only one Root CA and one Intermediate CA can exist per `CertGen` instance. The signing logic automatically selects the appropriate issuer for leaf certificates.
+Only one Root CA and one Intermediate CA can exist per `CertGen` instance.
 
-### Key Design Patterns
-
-**Serial Number Management**: The `__allocate_serial_number()` method maintains a counter for certificate serial numbers. Each certificate gets a unique serial number within a `CertGen` instance.
-
-**Certificate Chain Creation**: The `create_cert_chain()` method assembles PEM-formatted certificate chains by concatenating CN → IntCA → RootCA in the correct order for TLS/SSL usage.
-
-**Validity Periods**: Different certificate types have different default validity periods:
-- Root CA: 10 years (configurable via `self.validityEndInSeconds`)
-- Intermediate CA: 5 years (half of root validity)
-- Leaf certificates: 825 days (Apple's certificate lifetime requirement)
+### Validity Periods
+- Root CA: 10 years
+- Intermediate CA: 5 years
+- Leaf certificates: 825 days
 
 ### Extension System
 
-Extensions are defined in `EXTENSIONS` dictionary with this structure:
+Extensions are defined in `EXTENSIONS` dictionary:
 ```python
 "CategoryName": {
     "type": "Root" | "Intermediate" | "Leaf",
     "parameters": [
-        {
-            "extension": x509.ExtensionObject,
-            "critical": bool
-        }
+        {"extension": x509.ExtensionObject, "critical": bool}
     ]
 }
 ```
 
-To add new certificate types, add entries to this dictionary following the same pattern.
+## Implementation Notes
 
-## Important Implementation Notes
+### Key Serialization
+All private keys are serialized using PKCS8 format (`PrivateFormat.PKCS8`) for compatibility with EdDSA keys. TraditionalOpenSSL format does not support Ed25519/Ed448.
 
-### cryptography Library Migration
-The code uses the modern `cryptography` library's x509 module, not the legacy pyOpenSSL API (despite the pyOpenSSL dependency). When working with certificates:
-- Use `cryptography.x509` for certificate operations
-- Use `cryptography.hazmat.primitives` for key generation and hashing
-- Private keys are generated without encryption (`NoEncryption()`)
+### EdDSA Signing
+When signing with Ed25519 or Ed448 keys, pass `None` as the hash algorithm:
+```python
+# For EdDSA keys
+cert = builder.sign(private_key=key, algorithm=None)
+
+# For RSA/DSA/ECDSA keys
+cert = builder.sign(private_key=key, algorithm=hashes.SHA256())
+```
 
 ### File Handling
 - Default output directory: `/tmp/` (configurable via `basedir` parameter)
-- Certificate files use `.crt` extension
-- Private keys use `.pem` extension
-- The `obj2pem()` method handles serialization to PEM format
+- Certificate files: `.crt` extension
+- Private keys: `.pem` extension
+- CRL files: `.crl` extension
 
-### Timezone Handling
-All datetime objects must be timezone-aware (UTC). The code uses `timezone.utc` for all timestamp operations:
-```python
-datetime.now(timezone.utc)
-```
-
-### Hash Algorithm Mapping
-Hash algorithms are specified as strings ("sha1", "sha224", "sha256", "sha384", "sha512") and mapped to `cryptography.hazmat.primitives.hashes` objects internally.
+### Type Annotations
+The codebase uses Python type hints throughout:
+- Type aliases: `KeyType`, `HashAlgo`, `CertCategory`, `FormType`, `PathLike`
+- TypedDict classes in `cert_extensions.py`: `ExtensionConfig`, `CertTypeConfig`

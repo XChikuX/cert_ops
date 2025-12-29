@@ -19,6 +19,11 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.0.2",
+    "pytest-async>=0.1.1",
+    "pytest-codspeed>=4.2.0",
+    "pytest-cov>=7.0.0",
+    "pytest-memray>=1.8.0",
     "ruff>=0.14.10",
 ]
 
