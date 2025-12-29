@@ -43,7 +43,7 @@ def verify_cipher_suites(string):
     if not cipher_suites:
         raise ValueError
     if set(allowed_cipher_suites.keys()) == cipher_suites:
-        logger.info("Verified allowed ciphers on NSX are correct")
+        logger.info("Verified allowed ciphers are correct")
         return True
 
     logger.warning("Mismatch in number of cipher suites expected %s got %s",

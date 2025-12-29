@@ -1,20 +1,29 @@
-[tool.poetry]
-name = "certificate generator"
-version = "0.1"
+[project]
+name = "certificate-generator"
+version = "0.1.0"
 description = "Generates certificates based on the pyopenssl possibilities"
-authors = ["Srikanth Gopalakrishnan <srikanth.gokr@gmail.com>"]
-license = "MIT"
+authors = [{ name = "Srikanth Gopalakrishnan", email = "srikanth.gokr@gmail.com" }]
+license = { text = "MIT" }
 readme = "README.md"
-
-[tool.poetry.dependencies]
-python = "^3.10"
-pyOpenSSL = "^23.2.0"
-pyshark = "^0.6"
-
-[tool.poetry.group.dev.dependencies]
-rich = "^13.5.2"
-logging = "^0.4.9.6"
+requires-python = ">=3.10"
+dependencies = [
+    "pyOpenSSL>=25.3.0",
+    "pyshark>=0.6",
+    "rich>=14.2.0",
+    "typer>=0.21.0",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.10",
+]
+
+[tool.uv]
+managed = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["cert_gen"]

@@ -6,7 +6,7 @@ import socket
 
 from OpenSSL import crypto
 
-from cert_extensions import EXTENSIONS  # noqa
+from cert_gen.cert_extensions import EXTENSIONS  # noqa
 
 
 
