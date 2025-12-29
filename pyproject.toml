@@ -3,13 +3,19 @@ name = "certificate-generator"
 version = "0.1.0"
 description = "Generates certificates based on the pyopenssl possibilities"
 authors = [{ name = "Srikanth Gopalakrishnan", email = "srikanth.gokr@gmail.com" }]
-license = { text = "MIT" }
+license = { text = "Apache 2.0" }
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.128.0",
+    "fasthtml-admin>=0.1.2",
+    "fasthtml-sqlalchemy>=0.1.0",
+    "lucide-fasthtml>=0.0.9",
     "pyOpenSSL>=25.3.0",
     "pyshark>=0.6",
+    "python-fasthtml>=0.12.36",
     "rich>=14.2.0",
+    "sqlmodel>=0.0.31",
     "typer>=0.21.0",
 ]
 

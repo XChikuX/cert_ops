@@ -2,3 +2,4 @@
 uv.lock
 poetry.lock
 */__pycache__*
+*.pyc
