@@ -1,10 +1,15 @@
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import random
-import re
+
 import socket
 
-from OpenSSL import crypto
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, dsa
+from cryptography.x509.oid import NameOID
+
+
 
 from cert_gen.cert_extensions import EXTENSIONS  # noqa
 
@@ -117,16 +122,17 @@ class CertGen():
         """
         if isinstance(basedir, str):
             basedir = Path(basedir)
-        with open(basedir / pem_file, "wt") as f:
+        with open(basedir / pem_file, "wb") as f:
             if form.lower() == 'cert':
-                f.write(crypto.dump_certificate(
-                        crypto.FILETYPE_PEM, crypto_obj).decode('utf-8'))
+                f.write(crypto_obj.public_bytes(serialization.Encoding.PEM))
             elif form.lower() == 'key':
-                f.write(crypto.dump_privatekey(
-                        crypto.FILETYPE_PEM, crypto_obj).decode('utf-8'))
+                f.write(crypto_obj.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.TraditionalOpenSSL,
+                    encryption_algorithm=serialization.NoEncryption()
+                ))
             elif form.lower() == 'crl':
-                f.write(crypto.dump_crl(
-                        crypto.FILETYPE_PEM, crypto_obj).decode('utf-8'))
+                f.write(crypto_obj.public_bytes(serialization.Encoding.PEM))
             else:
                 raise ValueError('For argument "form": \
                                  Acceptable inputs are "cert" | "key" | "crl"')
@@ -139,107 +145,120 @@ class CertGen():
         """
         Generates a certificate based on the given common name
         and certains defaults.
-        It should be enough to change these defaults by changing the extension.
-
-        countryName - The country of the entity.
-        C - Alias for countryName.
-        stateOrProvinceName - The state or province of the entity.
-        ST - Alias for stateOrProvinceName.
-        localityName - The locality of the entity.
-        L - Alias for localityName.
-        organizationName - The organization name of the entity.
-        O - Alias for organizationName.
-        organizationalUnitName - The organizational unit of the entity.
-        OU - Alias for organizationalUnitName
-        commonName - The common name of the entity.
-        CN - Alias for commonName.
-        emailAddress - The e-mail address of the entity.
         """
         if key_length not in [1024, 2048, 3074, 4096]:
-            raise ValueError('Parameter error: key length must be 1024|2048|\
-                             3072|4096')
-        if signing_algo not in ['sha1', 'sha224', 'sha256', 'sha384', 'sha512']:
-            raise ValueError('Parameter error: signature algorithms must be \
-                             sha1|sha224|sha256|sha384|sha512')
+            raise ValueError('Parameter error: key length must be 1024|2048|3072|4096')
+        
+        # Map string algo to hashes class
+        hash_algo_map = {
+            'sha1': hashes.SHA1(),
+            'sha224': hashes.SHA224(),
+            'sha256': hashes.SHA256(),
+            'sha384': hashes.SHA384(),
+            'sha512': hashes.SHA512()
+        }
+        if signing_algo not in hash_algo_map:
+            raise ValueError('Parameter error: signature algorithms must be sha1|sha224|sha256|sha384|sha512')
+        
+        hash_algorithm = hash_algo_map[signing_algo]
+
         if key_type not in ('rsa', 'dsa'):
             raise ValueError('Parameter error: key type must be rsa|dsa')
+            
         cert_path = Path(commonName + str(".crt"))
         key_path = Path(commonName + str(".pem"))
-        # can look at generated file using openssl:
-        # openssl x509 -inform pem -in selfsigned.crt -noout -text
-        # create a key pair
-        key = crypto.PKey()
+
+        # Generate Key
         if key_type.lower() == 'rsa':
-            key.generate_key(crypto.TYPE_RSA, key_length)
+            key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=key_length
+            )
         elif key_type.lower() == 'dsa':
-            key.generate_key(crypto.TYPE_DSA, key_length)
+            key = dsa.generate_private_key(
+                key_size=key_length
+            )
+
+        # Create Builder
+        builder = x509.CertificateBuilder()
+        builder = builder.serial_number(self.__allocate_serial_number()) # Or x509.random_serial_number()
+        
+        # Subject
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, self.countryName),
+            x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, self.stateOrProvinceName),
+            x509.NameAttribute(NameOID.LOCALITY_NAME, self.localityName),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, self.organizationName),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, self.organizationUnitName),
+            x509.NameAttribute(NameOID.COMMON_NAME, commonName),
+            x509.NameAttribute(NameOID.EMAIL_ADDRESS, self.emailAddress),
+        ])
+        builder = builder.subject_name(subject)
+        builder = builder.public_key(key.public_key())
+
+        # Validity
+        now = datetime.now(timezone.utc)
+        builder = builder.not_valid_before(now)
+        
+        # Calculate NotAfter
+        if validityEndInSeconds:
+             builder = builder.not_valid_after(now + timedelta(seconds=validityEndInSeconds))
         else:
-            raise ValueError('Invalid key type, must be either "rsa" or "dsa"')
-        # create a self-signed cert
-        cert = crypto.X509()
-        cert.set_version(self.Version)
-        cert.get_subject().C = self.countryName
-        cert.get_subject().ST = self.stateOrProvinceName
-        cert.get_subject().L = self.localityName
-        cert.get_subject().organizationName = self.organizationName
-        cert.get_subject().OU = self.organizationUnitName
-        cert.get_subject().CN = commonName  # Should be TOI/server IP in case of leaf
-        cert.get_subject().emailAddress = self.emailAddress
-        cert.set_serial_number(self.__allocate_serial_number())
+             if EXTENSIONS[cert_category]['type'] == "Intermediate":
+                 builder = builder.not_valid_after(now + timedelta(seconds=int(self.validityEndInSeconds / 2)))
+             elif EXTENSIONS[cert_category]['type'] == "Leaf":
+                 builder = builder.not_valid_after(now + timedelta(days=825))
+             else:
+                 builder = builder.not_valid_after(now + timedelta(seconds=self.validityEndInSeconds))
 
-        # Set the pub key
-        cert.set_pubkey(key)
+        # Add Extensions
+        for ext_config in EXTENSIONS[cert_category]['parameters']:
+            builder = builder.add_extension(
+                ext_config['extension'], critical=ext_config['critical']
+            )
 
-        # TODO(@gsrikanth) Allow for expired certs to be generated
+        # Signing Logic
         if EXTENSIONS[cert_category]['type'] == "Root":
-            if validityEndInSeconds:
-                # In case of expired this value will need to be changed
-                cert.gmtime_adj_notBefore(0)
-                cert.gmtime_adj_notAfter(validityEndInSeconds)
-            else:
-                cert.gmtime_adj_notBefore(0)
-                cert.gmtime_adj_notAfter(self.validityEndInSeconds)
-            cert.add_extensions(EXTENSIONS[cert_category]['parameters'])
-            cert.set_issuer(cert.get_subject())
+            builder = builder.issuer_name(subject)
             if self.rootca:
                 raise ValueError("RootCA already present")
-            cert.sign(key, signing_algo)
+            
+            # Root signs itself
+            cert = builder.sign(
+                private_key=key, algorithm=hash_algorithm
+            )
             self.rootca['pkey'] = key
             self.rootca['cert'] = cert
 
         elif EXTENSIONS[cert_category]['type'] == "Intermediate":
-            if validityEndInSeconds:
-                cert.gmtime_adj_notBefore(0)
-                cert.gmtime_adj_notAfter(validityEndInSeconds)
-            else:
-                cert.gmtime_adj_notBefore(0)
-                # Intermediate Validity is x0.5 of Root
-                cert.gmtime_adj_notAfter(int(self.validityEndInSeconds / 2))
-            cert.add_extensions(EXTENSIONS[cert_category]['parameters'])
-            cert.set_issuer(self.rootca['cert'].get_subject())
+            if not self.rootca:
+                 raise ValueError("RootCA must be present to sign Intermediate")
+            
+            builder = builder.issuer_name(self.rootca['cert'].subject)
             if self.intca:
                 raise ValueError("IntCA already present")
-            cert.sign(self.rootca['pkey'], signing_algo)
+                
+            cert = builder.sign(
+                private_key=self.rootca['pkey'], algorithm=hash_algorithm
+            )
             self.intca['pkey'] = key
             self.intca['cert'] = cert
 
         elif EXTENSIONS[cert_category]['type'] == "Leaf":
-            if validityEndInSeconds:
-                cert.gmtime_adj_notBefore(0)
-                cert.gmtime_adj_notAfter(validityEndInSeconds)
-            else:
-                cert.gmtime_adj_notBefore(0)
-                # Leaf Validity is 825 days
-                cert.gmtime_adj_notAfter(825 * 24 * 60 * 60)
-            cert.add_extensions(EXTENSIONS[cert_category]['parameters'])
             if self.intca:
-                cert.set_issuer(self.intca['cert'].get_subject())
-                cert.sign(self.intca['pkey'], signing_algo)
+                builder = builder.issuer_name(self.intca['cert'].subject)
+                signing_key = self.intca['pkey']
             elif self.rootca:
-                cert.set_issuer(self.rootca['cert'].get_subject())
-                cert.sign(self.rootca['pkey'], signing_algo)
+                builder = builder.issuer_name(self.rootca['cert'].subject)
+                signing_key = self.rootca['pkey']
             else:
                 raise ValueError('Leaf cannot be self signed')
+            
+            cert = builder.sign(
+                private_key=signing_key, algorithm=hash_algorithm
+            )
+        else:
+            raise ValueError(f"Unknown cert category: {cert_category}")
 
         self.obj2pem(cert, cert_path, "cert", basedir=basedir)
         self.obj2pem(key, key_path, "key", basedir=basedir)
@@ -257,81 +276,100 @@ class CertGen():
         digest:     signature algorithm sha1|sha224|sha256|sha384|sha512
         Return:     the signed cert in PEM string
         """
-        notBeforeObj = datetime.strptime(notBefore, self.HUMAN_FORMAT)
-        notAfterObj = timedelta(days=validityDays) + notBeforeObj
-        notBefore = notBeforeObj.strftime(self.MACHINE_FORMAT)
-        notAfter = notAfterObj.strftime(self.MACHINE_FORMAT)
+        notBeforeObj = datetime.strptime(notBefore, self.HUMAN_FORMAT).replace(tzinfo=timezone.utc)
+        notAfterObj = notBeforeObj + timedelta(days=validityDays)
+        
+        # Load CA Key
+        with open(CAKeyFile, 'rb') as f:
+            ca_key = serialization.load_pem_private_key(f.read(), password=None)
+        
+        # Load CA Cert
+        with open(CACertFile, 'rb') as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read())
+            
+        # Load CSR
+        csr_bytes = csr.encode('utf-8') if isinstance(csr, str) else csr
+        csr_obj = x509.load_pem_x509_csr(csr_bytes)
+        
+        # Build Cert
+        builder = (x509.CertificateBuilder()
+                   .subject_name(csr_obj.subject)
+                   .issuer_name(ca_cert.subject)
+                   .public_key(csr_obj.public_key())
+                   .serial_number(random.randint(0, 4294967295))
+                   .not_valid_before(notBeforeObj)
+                   .not_valid_after(notAfterObj))
+        
+        # Hash algo
+        hash_algo_map = {
+            'sha1': hashes.SHA1(),
+            'sha224': hashes.SHA224(),
+            'sha256': hashes.SHA256(),
+            'sha384': hashes.SHA384(),
+            'sha512': hashes.SHA512()
+        }
+        hash_algorithm = hash_algo_map.get(digest, hashes.SHA512())
 
-        with open(CAKeyFile, 'r') as f:
-            CAKey = f.read()
-        with open(CACertFile, 'rb') as g:
-            CACert = g.read()
-        reqObj = crypto.load_certificate_request(crypto.FILETYPE_PEM, csr)
-        keyObj = crypto.load_privatekey(crypto.FILETYPE_PEM, CAKey)
-        crtObj = crypto.load_certificate(crypto.FILETYPE_PEM, CACert)
-        cert = crypto.X509()
-        cert.set_serial_number(random.randint(0, 4294967295))
-        cert.set_notBefore(bytes(notBefore, encoding='utf-8'))
-        cert.set_notAfter(bytes(notAfter, encoding='utf-8'))
-        cert.set_issuer(crtObj.get_subject())
-        cert.set_subject(reqObj.get_subject())
-        cert.set_pubkey(reqObj.get_pubkey())
-        cert.sign(keyObj, digest)
-        certStr = (crypto.dump_certificate(crypto.FILETYPE_PEM, cert).
-                   decode('utf-8'))
-        with open(signedCertFile, 'w') as h:
-            h.write(certStr)
-        return certStr
+        cert = builder.sign(private_key=ca_key, algorithm=hash_algorithm)
+        
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        with open(signedCertFile, 'wb') as h:
+            h.write(cert_pem)
+            
+        return cert_pem.decode('utf-8')
 
     def crl_gen(self, authCert, authKey, serial, lastUpdate, nextUpdate,
                 revokedFile, digest, base_dir='/tmp/'):
         """
-        Revoke a certificate and generate a new certificate revocation
-        list (CRL)
-        If 'revokeFile' is None, revoke nothing but updating the CRL
-        Arguments: issuerCert  - Authority cert's location
-                                 e.g. '/tmp/RootCA.crt'
-                   issuerKey   - Authority key's location
-                                 e.g. '/tmp/RootCA.pem'
-                   serial      - Serial number for the crl
-                   lastUpdate  - Last crl update in format YYYY-MM-DD hh:mm:ss
-                   nextUpdate  - Next crl update in format YYYY-MM-DD hh:mm:ss
-                   revokedFile - certificate to be revoked
-                                 e.g. '/tmp/leaf.crt'.
-                   digest      - Digest method to use for signing
-        Returns:   A crl in pem format, signed by authCert
+        Revoke a certificate and generate a new certificate revocation list (CRL)
         """
-        lastUpdateObj = datetime.strptime(lastUpdate, self.HUMAN_FORMAT)
-        nextUpdateObj = datetime.strptime(nextUpdate, self.HUMAN_FORMAT)
-        lastU = bytes(lastUpdateObj.strftime(self.MACHINE_FORMAT), encoding='utf-8')
-        nextU = bytes(nextUpdateObj.strftime(self.MACHINE_FORMAT), encoding='utf-8')
-        now = datetime.now()
+        lastUpdateObj = datetime.strptime(lastUpdate, self.HUMAN_FORMAT).replace(tzinfo=timezone.utc)
+        nextUpdateObj = datetime.strptime(nextUpdate, self.HUMAN_FORMAT).replace(tzinfo=timezone.utc)
+        
+        # Load Auth Cert and Key
+        with open(authCert, 'rb') as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read())
+        with open(authKey, 'rb') as f:
+            ca_key = serialization.load_pem_private_key(f.read(), password=None)
+            
+        builder = x509.CertificateRevocationListBuilder()
+        builder = builder.issuer_name(ca_cert.subject)
+        builder = builder.last_update(lastUpdateObj)
+        builder = builder.next_update(nextUpdateObj)
+        
+        if revokedFile:
+            with open(revokedFile, 'rb') as f:
+                revoked_cert = x509.load_pem_x509_certificate(f.read())
+            
+            # Create RevokedCertificateBuilder
+            revoked_builder = x509.RevokedCertificateBuilder()
+            revoked_builder = revoked_builder.serial_number(revoked_cert.serial_number)
+            revoked_builder = revoked_builder.revocation_date(datetime.now(timezone.utc))
+            builder = builder.add_revoked_certificate(revoked_builder.build())
+        
+        hash_algo_map = {
+            'sha1': hashes.SHA1(),
+            'sha224': hashes.SHA224(),
+            'sha256': hashes.SHA256(),
+            'sha384': hashes.SHA384(),
+            'sha512': hashes.SHA512()
+        }
+        hash_algorithm = hash_algo_map.get(digest, hashes.SHA512())
 
-        revoked = crypto.Revoked()
-        if revokedFile is None:
-            revoked.set_serial(b'0')
-            revoked.set_reason(None)
-        else:
-            revokedCert = self.pem2obj(revokedFile)
-            revoked.set_serial(bytes(hex(revokedCert.get_serial_number())[2:],
-                               encoding='utf-8'))
-            revoked.set_reason(b'keyCompromise')
-        revoked.set_rev_date(bytes(now.strftime(self.MACHINE_FORMAT),
-                             encoding='utf-8'))
-
-        parentCert = self.pem2obj(authCert)
-        parentKey = self.pem2obj(authKey)
-        crl = crypto.CRL()
-        crl.set_lastUpdate(lastU)
-        crl.set_nextUpdate(nextU)
-        crl.add_revoked(revoked)
-        crl.sign(parentCert, parentKey, bytes(digest, encoding='utf-8'))
-        crl.set_version(1)
-        authFile = re.sub(r'/tmp/', '', authCert)
-        authFile = re.sub(r'\.crt', '', authFile)
-        crlFile = base_dir + authFile + '.crl'
-        self.obj2pem(crl, crlFile, 'crl')
-        return crlFile
+        crl = builder.sign(private_key=ca_key, algorithm=hash_algorithm)
+        
+        # File naming logic preserved but using Path
+        auth_path = Path(authCert)
+        stem = auth_path.stem.replace('.crt', '') # handle double extensions if needed or just simple
+        if stem.endswith('.crt'): stem = stem[:-4]
+        
+        crlFile = Path(base_dir) / f"{stem}.crl"
+        
+        # obj2pem handles saving
+        # We pass basedir="" because we constructed the full path in crlFile (assuming base_dir was absolute)
+        # If base_dir is relative, it still works.
+        self.obj2pem(crl, crlFile, 'crl', basedir="")
+        return str(crlFile)
 
 
 if __name__ == "__main__":
